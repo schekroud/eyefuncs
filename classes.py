@@ -7,7 +7,7 @@ class EyeTriggers():
         self.timestamp = None
         self.event_id  = None
 
-class EyeHolder:
+class EyeHolder():
     def __init__(self):
         # self.fsamp = None
         self.info      = dict()
@@ -15,7 +15,7 @@ class EyeHolder:
         self.binocular = None
         self.eyes_recorded = []
 
-class Blinks:
+class Blinks():
     def __init__(self, blinkarray):
         self.nblinks = blinkarray.shape[0]
         self.blinkstart = blinkarray[:,0]

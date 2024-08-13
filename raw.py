@@ -2,15 +2,21 @@ import numpy as np
 import scipy as sp
 from copy import deepcopy
 import pickle
-from .utils import _calculate_blink_periods
+from .utils import smooth
+from .classes import Blinks
 
-class rawEyes:
+
+class rawEyes():
     def __init__(self, nblocks, srate):
         self.nblocks = nblocks
         self.data    = list()
         self.srate   = srate
         self.fsamp   = None
         self.binocular = None
+    
+    def save(self, fname):
+        with open(fname, 'wb') as handle:
+            pickle.dump(self, handle)
     
     def nan_missingdata(self):
         for iblock in range(self.nblocks): #loop over blocks
@@ -80,11 +86,6 @@ class rawEyes:
                     )
             self.data[iblock] = blockdata
 
-                
-    def save(self, fname):
-        with open(fname, 'wb') as handle:
-            pickle.dump(self, handle)
-            
     def cubicfit(self):
         #define cubic function to be fit to the data
         def cubfit(x, a, b, c, d):
@@ -123,7 +124,8 @@ class rawEyes:
                 transformed = np.multiply(np.divide(transformed, mean), 100)
             self.data[iblock].__setattr__('pupil_transformed', transformed) #save the transformed data back into the data object
             #self.data[iblock].pupil_transformed = transformed 
-            
+
+
 def _find_blinks_binocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms):
     '''
     data - a single block of recorded data (class: EyeHolder)
@@ -198,3 +200,50 @@ def _interpolate_blinks_binocular(data):
         cleanpupil[mask] = interpolated
         setattr(idata, f'pupil_{ieye}_clean', cleanpupil)
     return idata
+
+def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize, cleanms):
+    signal = pupil.copy()
+    vel    = np.diff(pupil) #derivative of pupil diameter
+    speed  = np.abs(vel)    #absolute velocity
+    smoothv   = smooth(vel, twin = 8, method = 'boxcar') #smooth with a 8ms boxcar to remove tremor in signal
+    smoothspd = smooth(speed, twin = 8, method = 'boxcar') #smooth to remove some tremor
+    #not sure if it quantitatively changes anything if you use a gaussian instead. the gauss filter makes it smoother though
+    
+    #pupil size only ever reaches zero if missing data. so we'll log this as missing data anyways
+    zerosamples = np.zeros_like(pupil, dtype=bool)
+    zerosamples[pupil==0] = True
+    
+    #create an array logging bad samples in the trace
+    badsamples = np.zeros_like(pupil, dtype=bool)
+    badsamples[1:] = np.logical_or(speed >= maxvelthresh, pupil[1:] > maxpupilsize)
+    
+    #a quick way of marking data for removal is to smooth badsamples with a boxcar of the same width as your buffer.
+    #it spreads the 1s in badsamples to the buffer period around (each value becomes 1/buffer width)
+    #can then just check if badsamples > 0 and it gets all samples in the contaminated window
+    badsamples = np.greater(smooth(badsamples.astype(float), twin = int(cleanms), method = 'boxcar'), 0).astype(bool)
+    badsamps = (badsamples | zerosamples) #get whether its marked as a bad sample, OR marked as a previously zero sample ('blinks' to be interpolated)
+    signal[badsamps==1] = np.nan #set these bad samples to nan
+    
+    #we want to  create 'blink' structures, so we need info here
+    changebads = np.zeros_like(pupil, dtype=int)
+    changebads[1:] = np.diff(badsamps.astype(int)) #+1 = from not missing -> missing; -1 = missing -> not missing
+
+    #starts are always off by one sample - when changebads == 1, the data is now MISSING. we need the sample before for interpolation
+    starts = np.squeeze(np.where(changebads==1)) -1
+    ends = np.squeeze(np.where(changebads==-1))
+
+    if starts.size != ends.size:
+        print(f"There is a problem with your data and the start/end of blinks dont match.\n- There are {starts.size} blink starts and {ends.size} blink ends")
+        if starts.size == ends.size - 1:
+            print('The recording starts on a blink; fixing')
+            starts = np.insert(starts, 0, 0, 0)
+        if starts.size == ends.size + 1:
+            print('The recording ends on a blink; fixing')
+            ends = np.append(ends, len(pupil))
+
+    durations = np.divide(np.subtract(ends, starts), srate) #get duration of each saccade in seconds
+    
+    blinkarray = np.array([starts, ends, durations]).T
+    blinks = Blinks(blinkarray)
+    
+    return blinks, signal #return structure containing blink information, and trace that indicates whether a sample was missing or not

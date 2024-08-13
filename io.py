@@ -1,8 +1,7 @@
 import numpy as np
-import scipy as sp
-import pickle
 from .raw import rawEyes
 from .classes import EyeHolder
+
 
 def parse_eyes(fname, srate = 1000):#, binocular = False):
     # if binocular:

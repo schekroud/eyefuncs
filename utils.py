@@ -1,57 +1,6 @@
 import numpy as np
 import scipy as sp
-import pickle
-from .classes import Blinks
-from .raw import rawEyes
 from .epoched import epochedEyes
-
-def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize, cleanms):
-    signal = pupil.copy()
-    vel    = np.diff(pupil) #derivative of pupil diameter
-    speed  = np.abs(vel)    #absolute velocity
-    smoothv   = smooth(vel, twin = 8, method = 'boxcar') #smooth with a 8ms boxcar to remove tremor in signal
-    smoothspd = smooth(speed, twin = 8, method = 'boxcar') #smooth to remove some tremor
-    #not sure if it quantitatively changes anything if you use a gaussian instead. the gauss filter makes it smoother though
-    
-    #pupil size only ever reaches zero if missing data. so we'll log this as missing data anyways
-    zerosamples = np.zeros_like(pupil, dtype=bool)
-    zerosamples[pupil==0] = True
-    
-    #create an array logging bad samples in the trace
-    badsamples = np.zeros_like(pupil, dtype=bool)
-    badsamples[1:] = np.logical_or(speed >= maxvelthresh, pupil[1:] > maxpupilsize)
-    
-    #a quick way of marking data for removal is to smooth badsamples with a boxcar of the same width as your buffer.
-    #it spreads the 1s in badsamples to the buffer period around (each value becomes 1/buffer width)
-    #can then just check if badsamples > 0 and it gets all samples in the contaminated window
-    badsamples = np.greater(smooth(badsamples.astype(float), twin = int(cleanms), method = 'boxcar'), 0).astype(bool)
-    badsamps = (badsamples | zerosamples) #get whether its marked as a bad sample, OR marked as a previously zero sample ('blinks' to be interpolated)
-    signal[badsamps==1] = np.nan #set these bad samples to nan
-    
-    #we want to  create 'blink' structures, so we need info here
-    changebads = np.zeros_like(pupil, dtype=int)
-    changebads[1:] = np.diff(badsamps.astype(int)) #+1 = from not missing -> missing; -1 = missing -> not missing
-
-    #starts are always off by one sample - when changebads == 1, the data is now MISSING. we need the sample before for interpolation
-    starts = np.squeeze(np.where(changebads==1)) -1
-    ends = np.squeeze(np.where(changebads==-1))
-
-    if starts.size != ends.size:
-        print(f"There is a problem with your data and the start/end of blinks dont match.\n- There are {starts.size} blink starts and {ends.size} blink ends")
-        if starts.size == ends.size - 1:
-            print('The recording starts on a blink; fixing')
-            starts = np.insert(starts, 0, 0, 0)
-        if starts.size == ends.size + 1:
-            print('The recording ends on a blink; fixing')
-            ends = np.append(ends, len(pupil))
-
-    durations = np.divide(np.subtract(ends, starts), srate) #get duration of each saccade in seconds
-    
-    blinkarray = np.array([starts, ends, durations]).T
-    blinks = Blinks(blinkarray)
-    
-    return blinks, signal #return structure containing blink information, and trace that indicates whether a sample was missing or not    
-
 
 def smooth(signal, twin = 50, method = 'boxcar'):
     '''
@@ -73,9 +22,6 @@ def smooth(signal, twin = 50, method = 'boxcar'):
     return smoothed_signal
 
 def strip_plr(data, plrtrigger, pre_buffer = 3):
-    if type(data) != rawEyes:
-        raise Exception(f'type must be rawEyes, not {type(data)}')
-        
     for iblock in range(data.nblocks):
         if plrtrigger in data.data[iblock].triggers.event_id:
             tmpdata = data.data[iblock]
@@ -109,30 +55,6 @@ def strip_plr(data, plrtrigger, pre_buffer = 3):
         data.fsamp = newfsamp
     
     return data #return the stripped data object
-
-def interpolate_blinks(data):
-    if type(data) != rawEyes:
-        raise Exception(f'type must be rawEyes, not {type(data)}')
-    
-    for iblock in range(data.nblocks):
-        tmpdata  = data.data[iblock]
-        pupil    = tmpdata.pupil.copy()
-        nanpupil = tmpdata.pupil_nan.copy()
-        times    = tmpdata.time.copy()
-        
-        mask = np.zeros_like(times, dtype=bool)
-        mask |= np.isnan(nanpupil)
-        
-        interpolated = np.interp(
-            times[mask],
-            times[~mask],
-            pupil[~mask]
-            )
-        
-        cleanpupil = nanpupil.copy()
-        cleanpupil[mask] = interpolated
-        data.data[iblock].pupil_clean = cleanpupil
-    return data
 
 def epochs(data, tmin, tmax, triggers, channel = 'pupil_clean'):
     nblocks = data.nblocks
