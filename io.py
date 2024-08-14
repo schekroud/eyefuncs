@@ -139,3 +139,9 @@ def _parse_monocular(fname, srate):
 def save(obj, fname):
         with open(fname, 'wb') as handle:
             pickle.dump(obj, handle)
+
+def read_raw(fname):
+    #read in the raw data
+    with open(fname, 'rb') as handle:
+        data = pickle.load(handle)
+    return data
