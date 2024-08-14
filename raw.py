@@ -1,7 +1,6 @@
 import numpy as np
 import scipy as sp
 from copy import deepcopy
-import pickle
 from .utils import smooth
 from .classes import Blinks
 
@@ -13,10 +12,6 @@ class rawEyes():
         self.srate   = srate
         self.fsamp   = None
         self.binocular = None
-    
-    def save(self, fname):
-        with open(fname, 'wb') as handle:
-            pickle.dump(self, handle)
     
     def nan_missingdata(self):
         for iblock in range(self.nblocks): #loop over blocks
@@ -52,13 +47,50 @@ class rawEyes():
                 blockdata = _find_blinks_monocular(blockdata, self.srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms)
             
             self.data[iblock] = blockdata #assign back into the data structure
+            self.data[iblock].info['blinks_identified'] = True #log that this step has happened
     
     def interpolate_blinks(self):
         for iblock in range(self.nblocks):
             if self.data[iblock].binocular:
                 self.data[iblock] = _interpolate_blinks_binocular(self.data[iblock])
             else:
-                self.data[iblock] = _interpolate_blinks_monocular(self.data[iblock])
+                nsamps = self.data[iblock].trackertime.size
+                if np.isnan(self.data[iblock].pupil).sum() == nsamps: #data missing for entire block
+                    self.data[iblock].info['full_block_missing'] = True
+                    setattr(self.data[iblock], 'pupil_clean', np.zeros(nsamps)*np.nan)
+                else:
+                    self.data[iblock].info['full_block_missing'] = False
+                    self.data[iblock] = _interpolate_blinks_monocular(self.data[iblock])
+            self.data[iblock].info['blinks_cleaned'] = True #log that this step has happened
+
+    def drop_eye(self, eye_to_drop):
+        '''
+        this function drops one eye from the data structure, and amends the structure accordingly. From this point on, code will perceive it to be monocular and look for appropriate attributes
+        '''
+        eye = eye_to_drop.lower() #force lower case to identify the right attributes
+        not_dropped = ['right' if eye == 'left' else 'left'][0]
+        nblocks = self.nblocks
+        for iblock in range(nblocks):
+            tmpdata = deepcopy(self.data[iblock])
+            if tmpdata.binocular == False:
+                print(f'skipping block {iblock+1} as data are already monocular')
+            elif tmpdata.binocular:
+                attrs_to_del = [x for x in tmpdata.__dict__.keys() if f'_{eye[0]}' in x]
+                for iattr in attrs_to_del:
+                    delattr(tmpdata, iattr)
+            attrs_to_rename = [x for x in tmpdata.__dict__.keys() if x[-2:] == f'_{not_dropped[0]}']
+            for attr in attrs_to_rename:
+                #rename attribute by creating a new one with the same values, then deleting the old one
+                setattr(tmpdata, attr[:-2], getattr(tmpdata, attr))
+                delattr(tmpdata, attr)
+                
+            setattr(tmpdata, 'binocular', False)
+            setattr(tmpdata, 'eyes_recorded', [not_dropped])
+            self.data[iblock] = tmpdata
+            
+                
+
+
 
     
     def smooth_pupil(self, sigma = 50):
@@ -70,20 +102,21 @@ class rawEyes():
             if blockdata.binocular:
                 for eye in blockdata.eyes_recorded:
                     ieye = eye[0]
-                    att = f'pupil_{ieye}_clean'
+                    att = f'pupil_clean_{ieye}'
                     if not hasattr(blockdata, att):
                         raise AttributeError(f'Attribute not found: could not find {att}')
                     else:
-                        setattr(blockdata, f'pupil_{ieye}_clean',
-                                sp.ndimage.gaussian_filter1d(getattr(blockdata, f'pupil_{ieye}_clean'), sigma=sigma) #smooth signal
+                        setattr(blockdata, f'pupil_clean_{ieye}',
+                                sp.ndimage.gaussian_filter1d(getattr(blockdata, f'pupil_clean_{ieye}'), sigma=sigma) #smooth signal
                                 )
             elif not blockdata.binocular:
                 if not hasattr(blockdata, 'pupil_clean'):
                     raise AttributeError('Attribute not found: could not find "pupil_clean"')
                 else:
-                    setattr(blockdata, 'pupil_clean',
-                            sp.ndimage.gaussian_filter1d(getattr(blockdata, 'pupil_clean'), sigma=sigma) #smooth signal
-                    )
+                    if not blockdata.info['full_block_missing']: #dont do anything if the full block is missing
+                        setattr(blockdata, 'pupil_clean',
+                                sp.ndimage.gaussian_filter1d(getattr(blockdata, 'pupil_clean'), sigma=sigma) #smooth signal
+                        )
             self.data[iblock] = blockdata
 
     def cubicfit(self):
@@ -93,7 +126,7 @@ class rawEyes():
         
         for iblock in range(self.nblocks):
             tmpdata = self.data[iblock]
-            if not tmpdata.binocular:
+            if not tmpdata.binocular and not tmpdata.info['full_block_missing']: #cant model when full block recorded is bad
                 fitparams = sp.optimize.curve_fit(cubfit, tmpdata.time, tmpdata.pupil_clean)[0]
                 modelled  = fitparams[0]*np.power(tmpdata.time, 3) + fitparams[1]*np.power(tmpdata.time, 2) + fitparams[2]*np.power(tmpdata.time, 1) + fitparams[3]
                 diff = tmpdata.pupil_clean - modelled #subtract this cubic fit
@@ -104,12 +137,13 @@ class rawEyes():
             elif tmpdata.binocular:
                 for eye in tmpdata.eyes_recorded:
                     ieye = eye[0] #get suffix used to get the right data
-                    ip = getattr(tmpdata, f'pupil_{ieye}_clean').copy()
+                    ip = getattr(tmpdata, f'pupil_clean_{ieye}').copy()
                     fitparams = sp.optimize.curve_fit(cubfit, tmpdata.time, ip)[0]
                     modelled  = fitparams[0]*np.power(tmpdata.time, 3) + fitparams[1]*np.power(tmpdata.time, 2) + fitparams[2]*np.power(tmpdata.time, 1) + fitparams[3]
                     diff = ip - modelled #subtract this cubic fit
-                    setattr(self.data[iblock], f'pupil_{ieye}_corrected', diff)
+                    setattr(self.data[iblock], f'pupil_corrected_{ieye}', diff)
                     setattr(self.data[iblock], f'modelled_{ieye}', modelled)
+            self.data[iblock].info['pupil_corrected'] = True #log that this step has happened
 
     
     def transform_channel(self, channel, method = 'percent'):
@@ -124,6 +158,7 @@ class rawEyes():
                 transformed = np.multiply(np.divide(transformed, mean), 100)
             self.data[iblock].__setattr__('pupil_transformed', transformed) #save the transformed data back into the data object
             #self.data[iblock].pupil_transformed = transformed 
+            self.data[iblock].info['pupil_transformed'] = True #log that this step has happened
 
 
 def _find_blinks_binocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms):
@@ -138,7 +173,7 @@ def _find_blinks_binocular(data, srate, buffer, add_nanchannel, blinkspd, maxvel
         iblinks, nantrace = _calculate_blink_periods(pupil, srate, blinkspd, maxvelthresh, maxpupilsize, cleanms)
         setattr(idata, 'blinks_'+ieye, iblinks)
         if add_nanchannel:
-            setattr(idata, f'pupil_{ieye}_nan', nantrace) #assign nan channel for this eye
+            setattr(idata, f'pupil_nan_{ieye}', nantrace) #assign nan channel for this eye
     return idata
 
 def _find_blinks_monocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms):
@@ -185,7 +220,7 @@ def _interpolate_blinks_binocular(data):
     for eye in idata.eyes_recorded:
         ieye = eye[0] #get suffix label
         pupil    = getattr(idata, f'pupil_{ieye}').copy()
-        nanpupil = getattr(idata, f'pupil_{ieye}_nan').copy()
+        nanpupil = getattr(idata, f'pupil_nan_{ieye}').copy()
         times    = getattr(idata, 'time').copy()
 
         mask = np.zeros_like(times, dtype=bool)
@@ -198,7 +233,7 @@ def _interpolate_blinks_binocular(data):
         )
         cleanpupil = nanpupil.copy()
         cleanpupil[mask] = interpolated
-        setattr(idata, f'pupil_{ieye}_clean', cleanpupil)
+        setattr(idata, f'pupil_clean_{ieye}', cleanpupil)
     return idata
 
 def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize, cleanms):
@@ -247,3 +282,6 @@ def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize
     blinks = Blinks(blinkarray)
     
     return blinks, signal #return structure containing blink information, and trace that indicates whether a sample was missing or not
+
+def _rename_attribute(obj, old_name, new_name):
+    obj.__dict__[new_name] = obj.__dict__.pop(old_name)
