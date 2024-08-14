@@ -88,11 +88,6 @@ class rawEyes():
             setattr(tmpdata, 'eyes_recorded', [not_dropped])
             self.data[iblock] = tmpdata
             
-                
-
-
-
-    
     def smooth_pupil(self, sigma = 50):
         '''
         smooth the clean pupil trace with a gaussian with standard deviation sigma
@@ -145,7 +140,6 @@ class rawEyes():
                     setattr(self.data[iblock], f'modelled_{ieye}', modelled)
             self.data[iblock].info['pupil_corrected'] = True #log that this step has happened
 
-    
     def transform_channel(self, channel, method = 'percent'):
         for iblock in range(self.nblocks): #loop over blocks in the data
             tmpdata = self.data[iblock].__getattribute__(channel).copy()
