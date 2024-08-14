@@ -1,4 +1,5 @@
 import numpy as np
+import pickle
 from .raw import rawEyes
 from .classes import EyeHolder
 
@@ -129,3 +130,7 @@ def _parse_monocular(fname, srate):
         
         eyedata.data.append(segdata)
     return eyedata # type: ignore
+
+def save(obj, fname):
+        with open(fname, 'wb') as handle:
+            pickle.dump(obj, handle)
