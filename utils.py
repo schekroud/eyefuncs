@@ -1,6 +1,6 @@
 import numpy as np
 import scipy as sp
-from .epoched import epochedEyes
+from .epochs import epochedEyes
 
 def smooth(signal, twin = 50, method = 'boxcar'):
     '''
@@ -56,9 +56,12 @@ def strip_plr(data, plrtrigger, pre_buffer = 3):
     
     return data #return the stripped data object
 
-def epochs(data, tmin, tmax, triggers, channel = 'pupil_clean'):
+def epochs(data, tmin, tmax, triggers, channels):
+    chanlist = channels
     nblocks = data.nblocks
     srate = data.srate
+    nchans = len(channels)
+    blocks = data.blocks
     allepochs = []
     alltrigs  = []
     for iblock in range(nblocks):
@@ -69,9 +72,10 @@ def epochs(data, tmin, tmax, triggers, channel = 'pupil_clean'):
         trigtimes = np.squeeze(np.where(np.isin(tmpdata.trackertime, trigttimes))) #get indices of the trigger onsets
         tmins = np.add(trigtimes, tmin*srate).astype(int) #enforce integer so you can use it as an index
         tmaxs = np.add(trigtimes, tmax*srate).astype(int) #enforce integer so you can use it as an index
-        iepochs = np.zeros(shape = [trigtimes.size, np.arange(tmin, tmax, 1/srate).size])
+        iepochs = np.zeros(shape = [trigtimes.size, nchans, np.arange(tmin, tmax, 1/srate).size])
         for itrig in range(tmins.size):
-            iepochs[itrig] = tmpdata.__dict__[channel][tmins[itrig]:tmaxs[itrig]]
+            for ichan in range(nchans):
+                iepochs[itrig, ichan] = getattr(tmpdata, channels[ichan])[tmins[itrig]:tmaxs[itrig]]
         allepochs.append(iepochs)
         alltrigs.append(epoched_events)
     stacked  = np.vstack(allepochs)
@@ -81,6 +85,8 @@ def epochs(data, tmin, tmax, triggers, channel = 'pupil_clean'):
     epochtimes = np.round(epochtimes, 3) #round to the nearest milisecond as we dont record faster than 1khz
     
     #create new object
-    epoched = epochedEyes(data = stacked, srate = srate, events = alltrigs, times = epochtimes)
-    
+    epoched = epochedEyes(data = stacked, srate = srate, events = alltrigs, times = epochtimes, channels = chanlist)
+    setattr(epoched, 'blocks', blocks) #log the blocks of data that went into this epoched structure
+    # setattr(epoched, channels, chanlist)
+
     return epoched
