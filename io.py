@@ -24,6 +24,9 @@ def _parse_eyes(fname, srate):
     
     starts = [x for x in range(len(raw_d)) if raw_d[x] != '\n' and raw_d[x].split()[0] == 'START']
     ends   = [x for x in range(len(raw_d)) if raw_d[x] != '\n' and raw_d[x].split()[0] == 'END']
+
+    # if len(ends) == len(starts)-1:
+        # print(f'')
     
     eyedata = rawEyes(nblocks=len(starts), srate = srate)
     eyedata.binocular=True #log that this *is* a binocular recording
@@ -75,6 +78,8 @@ def _parse_eyes(fname, srate):
         
         #some parsing of triggers etc
         msgs = [x.split() for x in msgs]
+        if len([x for x in msgs if len(x)==0])>0: #check if we have any items that are empty and drop if so
+            msgs = [x for x in msgs if len(x)>0]
         triggers = np.array([x for x in msgs if x[0] == 'MSG'])
         segdata.triggers.timestamp = triggers[:,1].astype(int)
         segdata.triggers.event_id  = triggers[:,2]
