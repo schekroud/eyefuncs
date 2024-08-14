@@ -38,6 +38,35 @@ class EyeHolder():
         setattr(self, 'binocular', False)
         setattr(self, 'eyes_recorded', [not_dropped])
 
+    def average_channels(self, channels, new_name, func = 'nanmean'):
+        '''
+        function to average across multiple channels, and create a new channel in place. this is particularly useful if you want to average across e.g. both eyes, and create an average pupil channel
+        note:
+            can specify the function to apply, if you wish. it defaults to nanmean in case of missing data and to allow you to average where a channel is missing for a dataset
+        '''
+        #first just check that the channels have the same size or not
+        sizes = [getattr(self, ichan).size for ichan in channels]
+        if np.unique(sizes).size != 1:
+            raise ValueError(f'channels to be averaged across have different trial durations')
+        else:
+            chans   = [getattr(self, ichan) for ichan in channels]
+            chans   = np.vstack(chans)
+            newchan = getattr(np, func)(chans, axis=0) #apply function across channels
+
+            setattr(self, new_name, newchan)
+            for ichan in channels:
+                delattr(self, ichan)
+    
+
+    def rename_channel(self, old_name, new_name):
+        '''
+        rename an attribute (specifically intended for channels) -- mostly intended to help aligning channel names across datasets for later analysis
+        '''
+        if not hasattr(self, old_name):
+            raise AttributeError(f'Attribute {old_name} could not be found')
+        else:
+            setattr(self, new_name, deepcopy(getattr(self, old_name))) #create new attribute with the same data
+            delattr(self, old_name) #delete the old attribute name
 
 class Blinks():
     def __init__(self, blinkarray):
