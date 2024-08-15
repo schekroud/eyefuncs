@@ -16,12 +16,13 @@ class epochedEyes():
 
     def apply_baseline(self, baseline):
         bmin, bmax = baseline[0], baseline[1]
+        [ntrls, nchannels, ntimes] = self.data.shape
         #get baseline value per trial
         blines = np.logical_and(np.greater_equal(self.times, bmin), np.less_equal(self.times, bmax))
-        blinedata = self.data[:,blines].mean(axis=1) #average across time in this window
-        for itrl in range(self.data.shape[0]):
-            self.data[itrl] -= blinedata[itrl]
-        
+        blinedata = self.data[:,:, blines].mean(axis=-1) #last axis is time, average across time in this window
+        for itrl in range(ntrls):
+            for ichan in range(nchannels):
+                self.data[itrl, ichan] -= blinedata[itrl, ichan]
         return self
 
 def concatenate_epochs(epoch_list):
