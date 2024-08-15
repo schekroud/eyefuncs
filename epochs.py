@@ -74,4 +74,6 @@ def concatenate_epochs(epoch_list):
                                 events = t, #assign the triggers
                                 times = e1.times,
                                 channels = e1.channels)
+        if not isinstance(m, type(None)):
+            setattr(newepochs, 'metadata', m) #assign metadata
         return newepochs
