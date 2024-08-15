@@ -58,15 +58,15 @@ def concatenate_epochs(epoch_list):
         t = np.hstack([e1.event_id, e2.event_id]) #horizontally concatenate triggers that were presented on each trial
         m = None
 
-        e1m = e1.metadata != None
-        e2m = e2.metadata != None
+        e1m = isinstance(e1.metadata, pd.DataFrame) #evals as True if metadata is a dataframe
+        e2m = isinstance(e2.metadata, pd.DataFrame) #evals as True if metadata is a dataframe
         if np.equal([e1m, e2m], True).sum() > 0: #check if there is any metadata available
             if e1m and not e2m:
                 m = e1.metadata
             elif not e1m and e2m:
                 m = e2.metadata
             elif e1m and e2m:
-                m = pd.concat([e1m, e2m]) #concatenate
+                m = pd.concat([e1.metadata, e2.metadata]) #concatenate
         
         #some attributes can be taken from either data set as they are checked to be equal, so it doesn't matter where its from
         newepochs = epochedEyes(data = d,   #add in concatenated data
