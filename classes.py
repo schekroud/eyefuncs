@@ -38,7 +38,7 @@ class EyeHolder():
         setattr(self, 'binocular', False)
         setattr(self, 'eyes_recorded', [not_dropped])
 
-    def average_channels(self, channels, new_name, func = 'nanmean'):
+    def average_channels(self, channels, new_name, remove_chans = False, func = 'nanmean'):
         '''
         function to average across multiple channels, and create a new channel in place. this is particularly useful if you want to average across e.g. both eyes, and create an average pupil channel
         note:
@@ -54,8 +54,9 @@ class EyeHolder():
             newchan = getattr(np, func)(chans, axis=0) #apply function across channels
 
             setattr(self, new_name, newchan)
-            for ichan in channels:
-                delattr(self, ichan)
+            if remove_chans:
+                for ichan in channels:
+                    delattr(self, ichan)
     
 
     def rename_channel(self, old_name, new_name):
