@@ -59,7 +59,7 @@ class EyeHolder():
                     delattr(self, ichan)
     
 
-    def rename_channel(self, old_name, new_name):
+    def rename_channel(self, old_name, new_name, delete_channel = True):
         '''
         rename an attribute (specifically intended for channels) -- mostly intended to help aligning channel names across datasets for later analysis
         '''
@@ -67,7 +67,8 @@ class EyeHolder():
             raise AttributeError(f'Attribute {old_name} could not be found')
         else:
             setattr(self, new_name, deepcopy(getattr(self, old_name))) #create new attribute with the same data
-            delattr(self, old_name) #delete the old attribute name
+            if delete_channel:
+                delattr(self, old_name) #delete the old attribute name
 
 class Blinks():
     def __init__(self, blinkarray):
