@@ -21,37 +21,67 @@ def smooth(signal, twin = 50, method = 'boxcar'):
 
     return smoothed_signal
 
-def strip_plr(data, plrtrigger, pre_buffer = 3):
+def _strip_plr(data, blockid, plrtrigger, buffer):
+    blockdata = data.data[blockid]
+    plrtrigs = np.where(blockdata.triggers.event_id == plrtrigger)[0]
+    
+    if plrtrigs[0] == 0: #first trigger of the block is the PLR, so the PLR was run before the task
+        plrloc = 'start'
+        ftrig = plrtrigs[-1]+1 #get the next trigger after the last PLR (start of the first trial of task)
+        ftrig_time = blockdata.triggers.timestamp[ftrig]
+        ftrigtime_cropped = ftrig_time - (data.srate*buffer) #some buffer to allow measurement of pre-trial pupil size
+        #find all timepoints that occur before this cropped timepoint
+        delinds = np.squeeze(np.where(blockdata.trackertime < ftrigtime_cropped))
+    elif plrtrigs[0] != 0: #if not the first trigger of the block, PLR was run at the end of the task block (i.e. end of the experiment)
+        plrloc = 'end'
+        ftrig = plrtrigs[0]-1 #get the previous trigger before the PLR started
+        ftrig_time = blockdata.triggers.timestamp[ftrig]
+        ftrigtime_cropped = ftrig_time + (data.srate*buffer) #some buffer after the last trigger to allow post-trial measurements
+        #find all timepoints that occur AFTER this cropped timepoint
+        delinds = np.squeeze(np.where(blockdata.trackertime > ftrigtime_cropped))
+    
+    #remove data from the appropriate channels based on monocular/binocular recordings
+    if blockdata.binocular:
+        for ieye in blockdata.eyes_recorded:
+            for trace in ['xpos', 'ypos', 'pupil']:
+                tmp = getattr(blockdata, f'{trace}_{ieye[0]}')
+                tmp = np.delete(tmp, delinds)
+                setattr(blockdata, f'{trace}_{ieye[0]}', tmp)
+    elif not blockdata.binocular:
+        for trace in ['xpos', 'ypos', 'pupil']:
+            tmp = getattr(blockdata, trace)
+            tmp = np.delete(tmp, delinds)
+            setattr(blockdata, trace, tmp)
+    
+    blockdata.trackertime = np.delete(blockdata.trackertime, delinds)
+    tmpfsamp = blockdata.trackertime[0] #reset the first sample. if the first sample was unchanged, this just recalculates the same array
+    blockdata.time = np.subtract(blockdata.trackertime, tmpfsamp) #update the time array too. if PLR was at the end, this effectively just crops the time array
+    
+    if plrloc == 'start':
+        trigs2rem = np.where(blockdata.triggers.timestamp < ftrigtime_cropped)
+    elif plrloc == 'end':
+        trigs2rem = np.where(blockdata.triggers.timestamp > ftrigtime_cropped)
+    blockdata.triggers.timestamp = np.delete(blockdata.triggers.timestamp, trigs2rem)
+    blockdata.triggers.event_id  = np.delete(blockdata.triggers.event_id, trigs2rem)
+    
+    data.data[blockid] = blockdata
+    return data
+
+def strip_plr(data, plrtrigger, buffer = 3):
+    '''
+    Routine to measure the Pupillary Light Response was performed twice - once before the beginning of the first block, once at the end of the second block
+    need to handle these separately as different assumptions.
+
+    NOTE: this only does anything if it finds a block of recording data where a PLR was run, otherwise nothing changes
+    '''
     for iblock in range(data.nblocks):
         if plrtrigger in data.data[iblock].triggers.event_id:
-            tmpdata = data.data[iblock]
-            plrtrigs = np.where(tmpdata.triggers.event_id == plrtrigger)[0] #get indices of plr triggers
-            ftrig = plrtrigs[-1]+1 #get the next trigger after the last PLR (start of the first trial of task)
-            ftrig_time = tmpdata.triggers.timestamp[ftrig]
-            ftrigtime_cropped = ftrig_time - (data.srate*pre_buffer)
+            data = _strip_plr(data, iblock, plrtrigger, buffer)    
             
-            #find all timepoints that occur before this cropped timepoint
-            delinds = np.squeeze(np.where(tmpdata.trackertime < ftrigtime_cropped))
-            
-            #remove data from relevant signals
-            tmpdata.xpos = np.delete(tmpdata.xpos, delinds)
-            tmpdata.ypos = np.delete(tmpdata.ypos, delinds)
-            tmpdata.pupil = np.delete(tmpdata.pupil, delinds)
-            tmpdata.trackertime = np.delete(tmpdata.trackertime, delinds)
-            tmpdata.fsamp = tmpdata.trackertime[0] #reset the first sample
-            tmpdata.time = np.subtract(tmpdata.trackertime, tmpdata.fsamp) #update the time array
-            
-            trigs2rem = np.where(tmpdata.triggers.timestamp < ftrigtime_cropped)
-            tmpdata.triggers.timestamp = np.delete(tmpdata.triggers.timestamp, trigs2rem)
-            tmpdata.triggers.event_id  = np.delete(tmpdata.triggers.event_id, trigs2rem)
-            
-            #set the data
-            data.data[iblock] = tmpdata
-    
     #get the first sample again and update if needed
     fsamp = data.fsamp
-    newfsamp = data.data[0].trackertime.min()
-    if int(fsamp) <= int(newfsamp):
+    newfsamp = data.data[0].trackertime.min() #get new first sample time of the data after stripping PLR
+    if int(fsamp) <= int(newfsamp): #this is TRUE if the PLR was at the start of the block recording
         data.fsamp = newfsamp
     
     return data #return the stripped data object
