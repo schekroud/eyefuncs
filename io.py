@@ -85,6 +85,14 @@ def _parse_eyes(fname, srate):
         segdata.triggers.event_id  = triggers[:,2]
         
         eyedata.data.append(segdata)
+
+        #check if all the data are monocular or not. if so, change the binocular param for the entire object
+        binchecks = [x.binocular for x in eyedata.data]
+        if np.sum(binchecks) == 0:
+            eyedata.binocular = False
+        #if there are _any_ binocular blocks then store as a binocular recording. bit of a pain i guess
+
+
     return eyedata
 
 def _parse_monocular(fname, srate):

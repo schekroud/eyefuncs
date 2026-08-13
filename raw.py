@@ -1,5 +1,6 @@
 import numpy as np
 import scipy as sp
+import scipy.ndimage as ndi
 from copy import deepcopy
 from .utils import smooth
 from .classes import Blinks
@@ -13,15 +14,30 @@ class rawEyes():
         self.fsamp   = None
         self.binocular = None
     
-    def nan_missingdata(self):
+    def nan_missingdata(self, align_eyes=False):
         for iblock in range(self.nblocks): #loop over blocks
             tmpdata = self.data[iblock]
             
             if tmpdata.binocular: 
-                for ieye in tmpdata.eyes_recorded:
-                    missinds = np.where(getattr(tmpdata, 'pupil_'+ieye[0]) == 0)[0] #missing data is assigned to 0 for pupil trace
-                    #replace missing values with nan
-                    traces = [f'{x}_{ieye[0]}' for x in ['pupil', 'xpos', 'ypos']] #get attribute labels to loop over
+                missing = np.vstack([
+                    np.equal(getattr(tmpdata, 'pupil_l'),0),
+                    np.equal(getattr(tmpdata, 'pupil_r'),0)
+                ])
+                aligned = np.greater(missing.sum(0), 0) #if sum if data is missing across the eyes. if 0, both present. if 1, 1 eye has missing data. 2 = both eyes missing that timepoint
+                if not align_eyes:
+                    for ieye in tmpdata.eyes_recorded:
+                        ie = ieye[0]
+                        if ie=='l':
+                            imissing=missing[0]
+                        else:
+                            imissing=missing[1]
+                        missinds = np.where(imissing)[0]
+                        traces = [f'{x}_{ie}' for x in ['pupil', 'xpos', 'ypos']]
+                        for trace in traces:
+                            getattr(tmpdata,trace)[missinds]=np.nan
+                else: #if aligning missing data from the two eyes
+                    missinds =np.where(aligned)[0]
+                    traces = [f'{x}_{y[0]}' for x in ['pupil', 'xpos', 'ypos'] for y in tmpdata.eyes_recorded]
                     for trace in traces:
                         getattr(tmpdata, trace)[missinds] = np.nan
             else:
@@ -31,23 +47,56 @@ class rawEyes():
                 
             self.data[iblock] = tmpdata
     
-    def identify_blinks(self, buffer = 0.150, add_nanchannel = True):
-        #set up some parameters for the algorithm
-        blinkspd        = 2.5                     #speed above which data is remove around nan periods -- threshold
-        maxvelthresh    = 30
-        maxpupilsize    = 20000
-        cleanms         = buffer * self.srate     #ms padding around the blink edges for removal
+    def identify_blinks(self, buffer = 0.150, add_nanchannel = True, bridge_time = 0.02, align_eyes = True):
+        """
+        detect blink-related data missingness and store:
+        - per-eye raw masks
+        - shared binocular mask (if align_eyes = True)
+        - blink structure (s)
+        - pupil trace with nan'd data
+        """
         
-        for iblock in range(self.nblocks): #loop over blocks in the data
-            blockdata = deepcopy(self.data[iblock])
-            binocular = blockdata.binocular
-            if binocular:
-                blockdata = _find_blinks_binocular(blockdata, self.srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms)
-            elif not binocular:
-                blockdata = _find_blinks_monocular(blockdata, self.srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms)
+        buffer_samples = int(buffer * self.srate)
+        bridge_samples = None if bridge_time is None else int(bridge_time * self.srate) #if there is a period of up to this duration between blinks, it bridges the gap to treat as one blink.    
+        
+        for iblock in range(self.nblocks):
+            if self.data[iblock].binocular:
+                nanmasks = _detect_blinks_binocular(self.data[iblock], buffer_samples, bridge_samples)
+                if align_eyes:
+                    aligned = np.logical_or(nanmasks[0], nanmasks[1])
+                eyesrec = self.data[iblock].eyes_recorded
+                ieyes = [x[0] for x in eyesrec] #should just output 'l' or 'r'
+                for (i, ie) in enumerate(ieyes):
+                    if align_eyes:
+                        setattr(self.data[iblock], f'nanmask_{ie}', aligned)
+                    else:
+                        setattr(self.data[iblock], f'nanmask_{ie}', nanmasks[i])
+                
+                    #create blink structure
+                    iblinks = _create_blink_structure(getattr(self.data[iblock], f'nanmask_{ie}'), self.srate)
+                    setattr(self.data[iblock], f'blinks_{ie}', iblinks)
+                    
+                    if add_nanchannel:
+                        ipupil = getattr(self.data[iblock], f'pupil_{ie}')
+                        imask  = getattr(self.data[iblock], f'nanmask_{ie}')
+                        nantrace = ipupil.copy()
+                        nantrace[imask] = np.nan
+                        setattr(self.data[iblock], f'pupil_nan_{ie}', nantrace)
+            else:
+                nanmask = _detect_blinks_monocular(self.data[iblock], buffer_samples, bridge_samples)
+                setattr(self.data[iblock], 'nanmask', nanmask)
+                iblinks = _create_blink_structure(getattr(self.data[iblock], 'nanmask'), self.srate)
+                setattr(self.data[iblock], 'blinks', iblinks)
+                
+                if add_nanchannel:
+                    ipupil = getattr(self.data[iblock], 'pupil')
+                    imask  = getattr(self.data[iblock], 'nanmask')
+                    nantrace = ipupil.copy()
+                    nantrace[imask] = np.nan
+                    setattr(self.data[iblock], 'pupil_nan', nantrace)
             
-            self.data[iblock] = blockdata #assign back into the data structure
-            self.data[iblock].info['blinks_identified'] = True #log that this step has happened
+            self.data[iblock].info['blinks_identified'] = True
+                
     
     def interpolate_blinks(self):
         for iblock in range(self.nblocks):
@@ -66,28 +115,41 @@ class rawEyes():
     def drop_eye(self, eye_to_drop):
         '''
         this function drops one eye from the data structure, and amends the structure accordingly. From this point on, code will perceive it to be monocular and look for appropriate attributes
+        
+        eye_to_drop can either be a single string ('left', 'right) or a list of strings ['none', 'left', 'right']. 
+        If a single string is passed, that eye is dropped for the entire object.
+        If a list of strings is passed, the eye to drop can vary across blocks of the task. it iterates over blocks to drop (or not) specific eyes. recodes each relevant block as monocular
         '''
-        eye = eye_to_drop.lower() #force lower case to identify the right attributes
-        not_dropped = ['right' if eye == 'left' else 'left'][0]
         nblocks = self.nblocks
+        mapping = {'left':'right', 'right':'left', 'none':'none'} #if left is dropped, right is not dropped. vice versa. preserve nones (no removal)
+        if not isinstance(eye_to_drop, list): #we are removing the same eye from all blocks in this case, so just make a list for each block
+            eyes2rem = [eye_to_drop] * nblocks
+        else:
+            eyes2rem = eye_to_drop
+        not_dropped = [mapping.get(x, 'none') for x in eyes2rem] #get the eye that wasnt dropped
         for iblock in range(nblocks):
-            tmpdata = deepcopy(self.data[iblock])
-            if tmpdata.binocular == False:
+            if self.data[iblock].binocular == False: #already monocular
                 print(f'skipping block {iblock+1} as data are already monocular')
-            elif tmpdata.binocular:
-                attrs_to_del = [x for x in tmpdata.__dict__.keys() if f'_{eye[0]}' in x]
-                for iattr in attrs_to_del:
-                    delattr(tmpdata, iattr)
-            attrs_to_rename = [x for x in tmpdata.__dict__.keys() if x[-2:] == f'_{not_dropped[0]}']
-            for attr in attrs_to_rename:
-                #rename attribute by creating a new one with the same values, then deleting the old one
-                setattr(tmpdata, attr[:-2], getattr(tmpdata, attr))
-                delattr(tmpdata, attr)
-                
-            setattr(tmpdata, 'binocular', False)
-            setattr(tmpdata, 'eyes_recorded', [not_dropped])
-            self.data[iblock] = tmpdata
-            
+            else:
+                if eyes2rem[iblock] != 'none':
+                    tmpdata = deepcopy(self.data[iblock])
+                    attrs_to_del = [x for x in tmpdata.__dict__.keys() if x.endswith(f'_{eyes2rem[iblock][0]}')]
+                    for iattr in attrs_to_del:
+                        delattr(tmpdata, iattr)
+                    attrs_to_rename = [x for x in tmpdata.__dict__.keys() if x.endswith(f'_{not_dropped[iblock][0]}')]
+                    for attr in attrs_to_rename:
+                        #rename attribute by creating a new one with the same values, then deleting the old one
+                        setattr(tmpdata, attr[:-2], getattr(tmpdata, attr))
+                        delattr(tmpdata, attr)
+                    setattr(tmpdata, 'binocular', False)
+                    setattr(tmpdata, 'eyes_recorded', [not_dropped[iblock]])
+                    self.data[iblock] = tmpdata
+        #there is a case where the same eye is removed from all blocks, or one eye is removed from all blocks (so its effectively monocular). check this and assign monocularity if so
+        binoccheck = np.sum([x.binocular for x in self.data])
+        if binoccheck == 0: #no binocular blocks found
+            self.binocular = False
+        #if there are any binocular blocks it'll leave it as binocular
+     
     def smooth_pupil(self, sigma = 50):
         '''
         smooth the clean pupil trace with a gaussian with standard deviation sigma
@@ -154,8 +216,78 @@ class rawEyes():
             #self.data[iblock].pupil_transformed = transformed 
             self.data[iblock].info['pupil_transformed'] = True #log that this step has happened
 
+def _detect_blinkmask_single_eye(pupil, buffer_samples, bridge_samples, blinkspd = 2.5, maxvelthresh = 30, maxpupilsize = 20000):
+    '''
+    
+    '''
+    signal = pupil.copy()
+    vel    = np.diff(pupil) #derivative of pupil diameter
+    speed  = np.abs(vel)    #absolute velocity
+    smoothv   = smooth(vel, twin = 8, method = 'boxcar') #smooth with a 8ms boxcar to remove tremor in signal
+    smoothspd = smooth(speed, twin = 8, method = 'boxcar') #smooth to remove some tremor
+    #not sure if it quantitatively changes anything if you use a gaussian instead. the gauss filter makes it smoother though
 
-def _find_blinks_binocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms):
+    #missing data should have already been set to nan, find them:
+    zerosamples = np.isnan(pupil) #check where data is missing.
+    
+    #create an array logging bad samples in the trace
+    badsamples = np.zeros_like(pupil, dtype=bool)
+    badsamples[1:] = np.logical_or(speed >= maxvelthresh, pupil[1:] > maxpupilsize)
+    
+    #expand the periods detected here with a buffer
+    badsamples = ndi.binary_dilation(badsamples, structure = np.ones(int(2*buffer_samples + 1)))
+    badsamps = (badsamples | zerosamples) #get whether its marked as a bad sample, OR marked as a previously zero sample ('blinks' to be interpolated)
+
+    if bridge_samples != None and bridge_samples >1:
+        badsamps = ndi.binary_closing(badsamps, structure = np.ones(bridge_samples)) #this will merge blinks that occur in rapid succession with a short (noisy) period of recorded data between
+    # signal[badsamps==1] = np.nan #set these bad samples to nan
+    return badsamps #return the boolean mask that marks bad data that should be set to nan
+
+def _detect_blinks_binocular(data, buffer_samples, bridge_samples):
+    '''
+    takes blockdata
+    '''
+    eyesrec = data.eyes_recorded
+    ieyes = [x[0] for x in eyesrec] #should just output 'l' or 'r'
+    masks = [None] * len(ieyes)
+    for (i, ie) in enumerate(ieyes):
+        masks[i] = _detect_blinkmask_single_eye(getattr(data, f'pupil_{ie}'), buffer_samples, bridge_samples)
+    masks = np.vstack(masks) #stack into an array
+    return masks
+
+def _detect_blinks_monocular(data, buffer_samples, bridge_samples):
+    '''
+    '''
+    mask = _detect_blinkmask_single_eye(getattr(data, 'pupil'), buffer_samples, bridge_samples)
+    return mask
+    
+
+def _create_blink_structure(mask, srate):
+    
+    '''
+    '''
+    
+    changebads = np.zeros_like(mask, dtype = int)
+    changebads[1:] = np.diff(mask.astype(int))
+    #starts are always off by one sample - when changebads == 1, the data is now MISSING. we need the sample before for interpolation
+    starts = np.squeeze(np.where(changebads==1)) -1
+    ends = np.squeeze(np.where(changebads==-1))
+
+    if starts.size != ends.size:
+        print(f"There is a problem with your data and the start/end of blinks dont match.\n- There are {starts.size} blink starts and {ends.size} blink ends")
+        if starts.size == ends.size - 1:
+            print('The recording starts on a blink; fixing')
+            starts = np.insert(starts, 0, 0, 0)
+        if starts.size == ends.size + 1:
+            print('The recording ends on a blink; fixing')
+            ends = np.append(ends, len(mask))
+    durations = np.divide(np.subtract(ends, starts), srate) #get duration of each saccade in seconds
+
+    blinkarray = np.array([starts, ends, durations]).T
+    blinks = Blinks(blinkarray)
+    return blinks
+
+def _find_blinks_binocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms, bridge_samples):
     '''
     data - a single block of recorded data (class: EyeHolder)
     '''
@@ -164,19 +296,19 @@ def _find_blinks_binocular(data, srate, buffer, add_nanchannel, blinkspd, maxvel
     for eye in eyesrec:
         ieye = eye[0] #the string for getting the data
         pupil = getattr(data, 'pupil_'+ieye) #get the pupil trace for this eye
-        iblinks, nantrace = _calculate_blink_periods(pupil, srate, blinkspd, maxvelthresh, maxpupilsize, cleanms)
+        iblinks, nantrace = _calculate_blink_periods(pupil, srate, blinkspd, maxvelthresh, maxpupilsize, cleanms, bridge_samples)
         setattr(idata, 'blinks_'+ieye, iblinks)
         if add_nanchannel:
             setattr(idata, f'pupil_nan_{ieye}', nantrace) #assign nan channel for this eye
     return idata
 
-def _find_blinks_monocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms):
+def _find_blinks_monocular(data, srate, buffer, add_nanchannel, blinkspd, maxvelthresh, maxpupilsize, cleanms, bridge_samples):
     '''
     data - a single block of recorded data (class: EyeHolder)
     '''
     idata = deepcopy(data)
     pupil = data.pupil
-    iblinks, nantrace = _calculate_blink_periods(pupil, srate, blinkspd, maxvelthresh, maxpupilsize, cleanms)
+    iblinks, nantrace = _calculate_blink_periods(pupil, srate, blinkspd, maxvelthresh, maxpupilsize, cleanms, bridge_samples)
     setattr(idata, 'blinks', iblinks)
     if add_nanchannel:
         setattr(idata, 'pupil_nan', nantrace) #assign nan channel for this eye
@@ -230,7 +362,7 @@ def _interpolate_blinks_binocular(data):
         setattr(idata, f'pupil_clean_{ieye}', cleanpupil)
     return idata
 
-def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize, cleanms):
+def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize, cleanms, bridge_samples):
     signal = pupil.copy()
     vel    = np.diff(pupil) #derivative of pupil diameter
     speed  = np.abs(vel)    #absolute velocity
@@ -239,18 +371,24 @@ def _calculate_blink_periods(pupil, srate,  blinkspd, maxvelthresh, maxpupilsize
     #not sure if it quantitatively changes anything if you use a gaussian instead. the gauss filter makes it smoother though
     
     #pupil size only ever reaches zero if missing data. so we'll log this as missing data anyways
-    zerosamples = np.zeros_like(pupil, dtype=bool)
-    zerosamples[pupil==0] = True
+    # zerosamples = np.zeros_like(pupil, dtype=bool)
+    # zerosamples[pupil==0] = True
+
+    #missing data should have already been set to nan, not zero:
+    zerosamples = np.isnan(pupil) #check where data is missing.
+    #if you work on the assumption that the eyelink accurately identifies blinks and set pupil to 0, we can smooth out this with a buffer period to capture the blink artefact
+    
     
     #create an array logging bad samples in the trace
     badsamples = np.zeros_like(pupil, dtype=bool)
     badsamples[1:] = np.logical_or(speed >= maxvelthresh, pupil[1:] > maxpupilsize)
     
-    #a quick way of marking data for removal is to smooth badsamples with a boxcar of the same width as your buffer.
-    #it spreads the 1s in badsamples to the buffer period around (each value becomes 1/buffer width)
-    #can then just check if badsamples > 0 and it gets all samples in the contaminated window
-    badsamples = np.greater(smooth(badsamples.astype(float), twin = int(cleanms), method = 'boxcar'), 0).astype(bool)
+    #expand the periods detected here with a buffer
+    badsamples = ndi.binary_dilation(badsamples, structure = np.ones(int(2*cleanms + 1)))
     badsamps = (badsamples | zerosamples) #get whether its marked as a bad sample, OR marked as a previously zero sample ('blinks' to be interpolated)
+
+    if bridge_samples != None:
+        badsamps = ndi.binary_closing(badsamps, structure = np.ones(bridge_samples)) #this will merge blinks that occur in rapid succession with a short (noisy) period of recorded data between
     signal[badsamps==1] = np.nan #set these bad samples to nan
     
     #we want to  create 'blink' structures, so we need info here

@@ -24,6 +24,15 @@ class epochedEyes():
             for ichan in range(nchannels):
                 self.data[itrl, ichan] -= blinedata[itrl, ichan]
         return self
+    
+    def crop(self, tmin, tmax):
+        [ntrls, nchannels, ntimes] = self.data.shape
+        tinds = np.where(np.logical_and(self.times <= tmax, self.times >= tmin))[0]
+        newdat = self.data.copy()[:,:,tinds]
+        newtimes = self.times[tinds]
+        self.data = newdat
+        self.times = newtimes
+        return self
 
 def concatenate_epochs(epoch_list):
     '''
